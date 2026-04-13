@@ -24,12 +24,18 @@ import { computeRunKey } from "../cache/run-key.js";
 import { expandSensitivityScan } from "../sweep/sensitivity.js";
 import type { SensitivityEntry } from "../sweep/sensitivity.js";
 import {
-  buildCoarseScan,
   rankAxisImpact,
   buildPhase1Winner,
   buildFocusedGrid,
 } from "../sweep/adaptive.js";
 import type { PhaseResult, AxisImpact } from "../sweep/adaptive.js";
+import {
+  partitionAxes,
+  ternaryProbePoints,
+  narrowRange,
+  buildTernaryRoundEntries,
+  bestValueForAxis,
+} from "../sweep/ternary.js";
 import { getDefaultAxisHints, applyAxisHints } from "../sweep/axis-hints.js";
 import type { AxisHintMap } from "../sweep/axis-hints.js";
 import {
@@ -575,59 +581,149 @@ export function registerScanCommand(
             );
           }
 
-          // ── Phase 1: Coarse OAT on remaining uncertain axes ──
-          const coarseScan = buildCoarseScan(reducedScan, 4);
-          const phase1Entries = expandSensitivityScan(
-            adaptiveBaseline,
-            coarseScan,
-          );
-          const phase1Runs =
-            phase1Entries.length *
-            resolvedConfig.workload.prompt_tokens.length *
-            resolvedConfig.workload.generation_tokens.length *
-            resolvedConfig.workload.repetitions;
+          // ── Partition axes: ternary search for numeric, exhaustive for rest ──
+          const partition = partitionAxes(reducedScan);
 
           if (verbose) {
-            logger.log(
-              chalk.bold(
-                "\n── Phase 1: Coarse OAT ──",
-              ),
-            );
-            const coarseAxes = Object.entries(coarseScan).filter(
-              ([, v]) =>
-                Array.isArray(v) && (v as unknown[]).length > 0,
-            );
-            for (const [axis, values] of coarseAxes) {
+            if (partition.ternary.length > 0) {
               logger.log(
-                `  ${axis}: [${(values as unknown[]).join(", ")}]`,
+                chalk.bold("\n── Ternary Search Axes ──"),
+              );
+              for (const t of partition.ternary) {
+                logger.log(
+                  `  ${t.axis}: ${t.sortedValues.length} values [${t.sortedValues[0]}..${t.sortedValues[t.sortedValues.length - 1]}]`,
+                );
+              }
+            }
+            if (partition.exhaustive.length > 0) {
+              logger.log(
+                chalk.bold("\n── Exhaustive Axes ──"),
+              );
+              for (const e of partition.exhaustive) {
+                logger.log(
+                  `  ${e.axis}: [${e.values.join(", ")}]`,
+                );
+              }
+            }
+          }
+
+          // ── Phase 1: Ternary search rounds ──
+          const maxRounds = 2;
+          let currentBaseline = { ...adaptiveBaseline };
+          let allPhaseResults: PhaseResult[] = [];
+          let runOffset = 0;
+
+          // Initial probe points for ternary axes
+          const probeMap = new Map<string, number[]>();
+          for (const t of partition.ternary) {
+            probeMap.set(t.axis, ternaryProbePoints(t.sortedValues));
+          }
+
+          for (let round = 0; round < maxRounds; round++) {
+            const roundEntries = buildTernaryRoundEntries(
+              currentBaseline,
+              partition,
+              probeMap,
+            );
+            const roundRunCount =
+              roundEntries.length *
+              resolvedConfig.workload.prompt_tokens.length *
+              resolvedConfig.workload.generation_tokens.length *
+              resolvedConfig.workload.repetitions;
+
+            if (verbose) {
+              logger.log(
+                chalk.bold(
+                  `\n── Phase 1 Round ${round + 1}/${maxRounds} ──`,
+                ),
+              );
+              for (const [axis, points] of probeMap.entries()) {
+                logger.log(
+                  `  ${axis}: probe [${points.join(", ")}]`,
+                );
+              }
+              logger.log(
+                `  ${roundEntries.length} configs × ${resolvedConfig.workload.repetitions} reps = ${chalk.cyan(String(roundRunCount))} runs`,
               );
             }
-            logger.log(
-              `  ${phase1Entries.length} configs × ${resolvedConfig.workload.repetitions} reps = ${chalk.cyan(String(phase1Runs))} runs`,
-            );
+
+            if (options.estimateOnly) {
+              if (round === 0) {
+                logger.log(
+                  `Estimated phase 1 round 1: ${roundRunCount} runs (round 2 narrows, then phase 2 depends on results)`,
+                );
+              }
+              return;
+            }
+
+            const roundResult = await runEntries({
+              ...sharedCtx,
+              entries: roundEntries,
+              historicalRecords: [
+                ...historicalRecords,
+                ...allRecords,
+              ],
+              runOffset,
+              phaseLabel: `P1R${round + 1}`,
+            });
+
+            allRecords.push(...roundResult.records);
+            allPhaseResults.push(...roundResult.phaseResults);
+            totalExecuted += roundResult.executed;
+            totalCacheHits += roundResult.cacheHits;
+            totalFailed += roundResult.failed;
+            if (roundResult.hadFailures) hadFailures = true;
+            runOffset += roundRunCount;
+
+            // Narrow ternary axes toward best value for next round
+            let anyNarrowed = false;
+            for (const t of partition.ternary) {
+              const best = bestValueForAxis(
+                roundResult.phaseResults,
+                t.axis,
+              );
+              if (best !== null) {
+                const narrowed = narrowRange(
+                  t.sortedValues,
+                  best,
+                  round + 1,
+                );
+                const prev = probeMap.get(t.axis) ?? [];
+                // Only continue narrowing if we get different points
+                if (JSON.stringify(narrowed) !== JSON.stringify(prev)) {
+                  probeMap.set(t.axis, narrowed);
+                  anyNarrowed = true;
+                }
+                // Update baseline with best so far
+                currentBaseline[t.axis] = best;
+              }
+            }
+
+            // Also update baseline with best exhaustive values
+            for (const e of partition.exhaustive) {
+              const best = bestValueForAxis(
+                roundResult.phaseResults,
+                e.axis,
+              );
+              if (best !== null) {
+                currentBaseline[e.axis] = best;
+              }
+            }
+
+            if (!anyNarrowed) {
+              if (verbose) {
+                logger.log(
+                  chalk.dim(
+                    "  No further narrowing possible — stopping early.",
+                  ),
+                );
+              }
+              break;
+            }
           }
 
-          if (options.estimateOnly) {
-            logger.log(
-              `Estimated phase 1 runs: ${phase1Runs} (phase 2 depends on results)`,
-            );
-            return;
-          }
-
-          const phase1 = await runEntries({
-            ...sharedCtx,
-            entries: phase1Entries,
-            phaseLabel: "P1",
-          });
-
-          allRecords.push(...phase1.records);
-          totalExecuted += phase1.executed;
-          totalCacheHits += phase1.cacheHits;
-          totalFailed += phase1.failed;
-          if (phase1.hadFailures) hadFailures = true;
-
-          // ── Analyze impact ──
-          const impacts = rankAxisImpact(phase1.phaseResults);
+          // ── Analyze impact from all phase 1 rounds ──
+          const impacts = rankAxisImpact(allPhaseResults);
           if (verbose || impacts.length > 0) {
             printImpactReport(logger, impacts);
           }
@@ -643,9 +739,9 @@ export function registerScanCommand(
               ),
             );
           } else {
-            // ── Phase 2: Focused grid ──
+            // ── Phase 2: Focused grid on top impactful axes ──
             const winner = buildPhase1Winner(
-              adaptiveBaseline,
+              currentBaseline,
               significantImpacts,
             );
             const phase2Entries = buildFocusedGrid(
@@ -671,9 +767,6 @@ export function registerScanCommand(
                 `  Top axes: ${significantImpacts.slice(0, 3).map((i) => i.axis).join(", ")}`,
               );
               logger.log(
-                `  Winner baseline: ${JSON.stringify(winner)}`,
-              );
-              logger.log(
                 `  ${phase2Entries.length} configs × ${resolvedConfig.workload.repetitions} reps = ${chalk.cyan(String(phase2Runs))} runs`,
               );
             }
@@ -685,7 +778,7 @@ export function registerScanCommand(
                 ...historicalRecords,
                 ...allRecords,
               ],
-              runOffset: phase1Runs,
+              runOffset,
               phaseLabel: "P2",
             });
 
