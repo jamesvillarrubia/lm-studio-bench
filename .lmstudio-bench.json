@@ -1,0 +1,23 @@
+{
+  "llama_bench_path": "/opt/homebrew/bin/llama-bench",
+  "llama_cli_path": "/opt/homebrew/bin/llama-cli",
+  "hardware": {
+    "chip": "Apple Silicon",
+    "cores": 12,
+    "p_cores": 8,
+    "e_cores": 4,
+    "memory_gb": 64,
+    "metal": true
+  },
+  "model_dirs": [
+    "~/.lmstudio/models",
+    "~/Library/Application Support/LM Studio/models"
+  ],
+  "models": [
+    {
+      "name": "gemma-4-26B-A4B-it-Q4_K_M",
+      "path": "/Users/james/.lmstudio/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+      "size_gb": 15.64
+    }
+  ]
+}
