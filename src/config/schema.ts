@@ -74,11 +74,23 @@ export const WorkloadSchema = z.object({
 
 export type Workload = z.infer<typeof WorkloadSchema>;
 
+export const AxisHintSchema = z.object({
+  direction: z.enum([
+    "max",
+    "min",
+    "prefer_true",
+    "prefer_false",
+    "unconstrained",
+  ]),
+  reason: z.string().optional(),
+});
+
 export const SweepConfigSchema = z.object({
   models: z.array(SweepModelSchema).min(1),
   baseline: BenchmarkBaselineSchema,
   scan: BenchmarkScanSchema,
   workload: WorkloadSchema,
+  axis_hints: z.record(z.string(), AxisHintSchema).default({}),
   model_overrides: z
     .array(
       z.object({

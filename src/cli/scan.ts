@@ -30,6 +30,8 @@ import {
   buildFocusedGrid,
 } from "../sweep/adaptive.js";
 import type { PhaseResult, AxisImpact } from "../sweep/adaptive.js";
+import { getDefaultAxisHints, applyAxisHints } from "../sweep/axis-hints.js";
+import type { AxisHintMap } from "../sweep/axis-hints.js";
 import {
   appendRunRecord,
   loadRunRecords,
@@ -537,10 +539,46 @@ export function registerScanCommand(
         };
 
         if (strategy === "adaptive") {
-          // ── Phase 1: Coarse OAT ──
-          const coarseScan = buildCoarseScan(appliedScan, 4);
+          // ── Apply axis hints to pin known-optimal values ──
+          // Hardware defaults, then YAML overrides on top
+          const yamlHints = config.axis_hints ?? {};
+          const hints: AxisHintMap = {
+            ...getDefaultAxisHints(state.hardware),
+            ...Object.fromEntries(
+              Object.entries(yamlHints).map(([k, v]) => [
+                k,
+                {
+                  direction: v.direction,
+                  reason: v.reason ?? "User override in sweep-config.yaml",
+                },
+              ]),
+            ),
+          };
+          const { pinnedOverrides, reducedScan, pinLog } =
+            applyAxisHints(appliedScan, hints);
+
+          // Override baseline with pinned values
+          const adaptiveBaseline = { ...baseline, ...pinnedOverrides };
+
+          if (verbose && pinLog.length > 0) {
+            logger.log(
+              chalk.bold("\n── Pinned Axes (known-optimal) ──"),
+            );
+            for (const pin of pinLog) {
+              logger.log(
+                `  ${chalk.green("✓")} ${pin.axis}=${String(pin.value)} — ${pin.reason}`,
+              );
+            }
+          } else if (pinLog.length > 0) {
+            logger.log(
+              `Pinned ${pinLog.length} axis(es) to known-optimal: ${pinLog.map((p) => `${p.axis}=${String(p.value)}`).join(", ")}`,
+            );
+          }
+
+          // ── Phase 1: Coarse OAT on remaining uncertain axes ──
+          const coarseScan = buildCoarseScan(reducedScan, 4);
           const phase1Entries = expandSensitivityScan(
-            baseline,
+            adaptiveBaseline,
             coarseScan,
           );
           const phase1Runs =
@@ -607,13 +645,13 @@ export function registerScanCommand(
           } else {
             // ── Phase 2: Focused grid ──
             const winner = buildPhase1Winner(
-              baseline,
+              adaptiveBaseline,
               significantImpacts,
             );
             const phase2Entries = buildFocusedGrid(
               winner,
               significantImpacts,
-              appliedScan,
+              reducedScan,
               3,
               5,
             );
