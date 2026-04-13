@@ -1,8 +1,7 @@
 models:
   - path: /Users/james/.lmstudio/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf
     name: gemma-4-26B-A4B-it-Q4_K_M
-  - path: /Users/james/.lmstudio/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/mmproj-gemma-4-26B-A4B-it-BF16.gguf
-    name: mmproj-gemma-4-26B-A4B-it-BF16
+
 baseline:
   n_ctx: 4096
   n_batch: 512
@@ -15,41 +14,102 @@ baseline:
   flash_attention: true
   mmap: true
   mlock: false
+  no_kv_offload: false
+  n_cpu_moe: 0
+
 scan:
+  # NOT SUPPORTED by this build (no flag in llama-bench):
+  mlock: []
+
+  # Context window — measures KV cache size impact on throughput
   n_ctx:
     - 2048
     - 4096
     - 8192
     - 16384
     - 32768
+    - 65536
+    - 131072
+
+  # Batch sizes
   n_batch:
     - 128
     - 256
     - 512
     - 1024
+    - 2048
+  n_ubatch:
+    - 64
+    - 128
+    - 256
+    - 512
+
+  # GPU offloading
   n_gpu_layers:
+    - 0
+    - 8
     - 16
     - 24
     - 28
     - 32
     - 99
+  no_kv_offload:
+    - true
+    - false
+
+  # Threading
   threads:
+    - 1
+    - 2
     - 4
     - 6
     - 8
     - 10
     - 12
+  threads_batch:
+    - 1
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+
+  # KV cache quantization — all types LM Studio exposes
   kv_type_key:
+    - f32
     - f16
     - q8_0
     - q4_0
+    - q4_1
+    - iq4_nl
+    - q5_0
+    - q5_1
   kv_type_value:
+    - f32
     - f16
     - q8_0
     - q4_0
+    - q4_1
+    - iq4_nl
+    - q5_0
+    - q5_1
+
+  # Booleans
   flash_attention:
     - true
     - false
+  mmap:
+    - true
+    - false
+
+  # MoE expert routing (only relevant for MoE models, ignored for dense)
+  n_cpu_moe:
+    - 0
+    - 1
+    - 2
+    - 4
+
 workload:
   prompt_tokens:
     - 512
