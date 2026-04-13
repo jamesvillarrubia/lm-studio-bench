@@ -1,5 +1,5 @@
 {
-  "llama_bench_path": "/opt/homebrew/bin/llama-bench",
+  "llama_bench_path": "/usr/local/bin/llama-bench-patched",
   "llama_cli_path": "/opt/homebrew/bin/llama-cli",
   "hardware": {
     "chip": "Apple Silicon",
