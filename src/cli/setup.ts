@@ -64,30 +64,10 @@ export function createDefaultSweepConfig(
         ? [0, 4, 6, 8, 10, 12]
         : [],
       kv_type_key: s.has("kv_type_key")
-        ? [
-            "f16",
-            "f32",
-            "s16",
-            "q8_0",
-            "q4_0",
-            "q4_1",
-            "iq4_nl",
-            "q5_0",
-            "q5_1",
-          ]
+        ? ["f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
         : [],
       kv_type_value: s.has("kv_type_value")
-        ? [
-            "f16",
-            "f32",
-            "s16",
-            "q8_0",
-            "q4_0",
-            "q4_1",
-            "iq4_nl",
-            "q5_0",
-            "q5_1",
-          ]
+        ? ["f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
         : [],
       flash_attention: s.has("flash_attention") ? [true, false] : [],
       mmap: s.has("mmap") ? [true, false] : [],

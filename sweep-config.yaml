@@ -75,10 +75,11 @@ scan:
     - 10
     - 12
 
-  # KV cache quantization — all types LM Studio exposes
+  # KV cache quantization — types accepted by llama-bench
+  # f32 is NOT supported as a KV cache type by llama-bench
   kv_type_key:
-    - f32
     - f16
+    - bf16
     - q8_0
     - q4_0
     - q4_1
@@ -86,8 +87,8 @@ scan:
     - q5_0
     - q5_1
   kv_type_value:
-    - f32
     - f16
+    - bf16
     - q8_0
     - q4_0
     - q4_1
