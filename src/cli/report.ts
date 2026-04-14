@@ -10,10 +10,14 @@ import {
   buildComparisonCsv,
 } from "../reporter/csv.js";
 import type { ComparisonRow } from "../reporter/csv.js";
+import {
+  resolveDataRoot,
+  resultsDir,
+} from "../config/data-root.js";
 import type { LoggerLike } from "../reporter/terminal.js";
 
 export interface ReportDeps {
-  cwd?: () => string;
+  dataRoot?: string;
   logger?: LoggerLike & { error(message: string): void };
 }
 
@@ -21,15 +25,23 @@ export function registerReportCommand(
   command: Command,
   deps: ReportDeps,
 ): void {
-  const cwd = deps.cwd ?? (() => process.cwd());
   const logger = deps.logger ?? console;
 
   command
     .command("report")
     .description("Regenerate CSV summaries from runs.jsonl files")
-    .option("-i, --input <dir>", "Results directory", "results")
-    .action(async (options: { input?: string }) => {
-      const root = path.resolve(cwd(), options.input ?? "results");
+    .option(
+      "-i, --input <dir>",
+      "Results directory (default: <data-dir>/results)",
+    )
+    .option(
+      "--data-dir <path>",
+      "Data directory (default: ~/.lmstudio-bench)",
+    )
+    .action(async (options: { input?: string; dataDir?: string }) => {
+      const root = options.input
+        ? path.resolve(options.input)
+        : resultsDir(resolveDataRoot(options.dataDir ?? deps.dataRoot));
       const entries = await readdir(root, { withFileTypes: true });
       const modelDirs = entries
         .filter((entry) => entry.isDirectory())

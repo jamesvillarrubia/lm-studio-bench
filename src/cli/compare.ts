@@ -3,6 +3,15 @@ import path from "path";
 import type { Command } from "commander";
 import { fileExists, readJson, readYaml } from "../config/loader.js";
 import {
+  resolveDataRoot,
+  ensureDataRoot,
+  statePath,
+  sweepConfigPath,
+  modelRunsPath,
+  modelSummaryPath,
+  comparisonCsvPath,
+} from "../config/data-root.js";
+import {
   LocalStateSchema,
   SweepConfigSchema,
   RunRecordSchema,
@@ -96,7 +105,7 @@ function buildCacheHitRecord(
 }
 
 export interface CompareDeps {
-  cwd?: () => string;
+  dataRoot?: string;
   logger?: LoggerLike;
   now?: () => Date;
   benchRunner: BenchRunner;
@@ -107,7 +116,6 @@ export function registerCompareCommand(
   command: Command,
   deps: CompareDeps,
 ): void {
-  const cwd = deps.cwd ?? (() => process.cwd());
   const logger = deps.logger ?? console;
   const now = deps.now ?? (() => new Date());
 
@@ -122,7 +130,11 @@ export function registerCompareCommand(
       collectString,
       [],
     )
-    .option("-c, --config <path>", "Config path", "sweep-config.yaml")
+    .option("-c, --config <path>", "Config path (default: <data-dir>/sweep-config.yaml)")
+    .option(
+      "--data-dir <path>",
+      "Data directory (default: ~/.lmstudio-bench)",
+    )
     .option(
       "--rerun",
       "Ignore successful benchmark cache hits and execute all planned runs",
@@ -135,6 +147,7 @@ export function registerCompareCommand(
       async (options: {
         model: string[];
         config?: string;
+        dataDir?: string;
         rerun?: boolean;
         retryFailed?: boolean;
       }) => {
@@ -143,16 +156,14 @@ export function registerCompareCommand(
             "Provide at least two --model values for comparison",
           );
         }
-        const root = cwd();
-        const statePath = path.join(root, ".lmstudio-bench.json");
-        if (!(await fileExists(statePath))) {
+        const root = resolveDataRoot(options.dataDir ?? deps.dataRoot);
+        await ensureDataRoot(root);
+        const sp = statePath(root);
+        if (!(await fileExists(sp))) {
           throw new Error("Run `lmstudio-bench setup` first");
         }
-        const configPath = path.join(
-          root,
-          options.config ?? "sweep-config.yaml",
-        );
-        const state = await readJson(statePath, LocalStateSchema);
+        const configPath = sweepConfigPath(root, options.config);
+        const state = await readJson(sp, LocalStateSchema);
         const capabilities =
           deps.benchCapabilities ??
           (await probeLlamaBenchCapabilities(state.llama_bench_path));
@@ -210,14 +221,12 @@ export function registerCompareCommand(
           );
           const appliedBaselineRecord =
             tuningSnapshotToRecord(appliedBaseline);
-          const modelRunsPath = path.join(
+          const runsPath = modelRunsPath(
             root,
-            "results",
             sanitizeFilePart(model.modelName),
-            "runs.jsonl",
           );
           const historicalRecords =
-            await loadRunRecords(modelRunsPath);
+            await loadRunRecords(runsPath);
           const modelRecords: RunRecord[] = [];
 
           for (
@@ -311,7 +320,7 @@ export function registerCompareCommand(
                 error: null,
               });
               modelRecords.push(record);
-              await appendRunRecord(modelRunsPath, record);
+              await appendRunRecord(runsPath, record);
             } catch (error) {
               hadFailures = true;
               const record = RunRecordSchema.parse({
@@ -333,7 +342,7 @@ export function registerCompareCommand(
                 },
               });
               modelRecords.push(record);
-              await appendRunRecord(modelRunsPath, record);
+              await appendRunRecord(runsPath, record);
             }
           }
           const summaries = summarizeRecords(modelRecords);
@@ -342,12 +351,7 @@ export function registerCompareCommand(
           }
           const summaryCsv = buildModelSummaryCsv(summaries);
           await writeFile(
-            path.join(
-              root,
-              "results",
-              sanitizeFilePart(model.modelName),
-              "summary.csv",
-            ),
+            modelSummaryPath(root, sanitizeFilePart(model.modelName)),
             summaryCsv,
             "utf8",
           );
@@ -364,7 +368,7 @@ export function registerCompareCommand(
           });
         }
         await writeFile(
-          path.join(root, "results", "comparison.csv"),
+          comparisonCsvPath(root),
           buildComparisonCsv(rows),
           "utf8",
         );

@@ -3,6 +3,13 @@ import chalk from "chalk";
 import type { Command } from "commander";
 import { fileExists, readJson, readYaml } from "../config/loader.js";
 import {
+  resolveDataRoot,
+  ensureDataRoot,
+  statePath,
+  sweepConfigPath,
+  modelRunsPath,
+} from "../config/data-root.js";
+import {
   LocalStateSchema,
   SweepConfigSchema,
   RunRecordSchema,
@@ -375,7 +382,7 @@ function printImpactReport(
 }
 
 export interface ScanDeps {
-  cwd?: () => string;
+  dataRoot?: string;
   now?: () => Date;
   logger?: LoggerLike;
   benchRunner: BenchRunner;
@@ -386,7 +393,6 @@ export function registerScanCommand(
   command: Command,
   deps: ScanDeps,
 ): void {
-  const cwd = deps.cwd ?? (() => process.cwd());
   const now = deps.now ?? (() => new Date());
   const logger = deps.logger ?? console;
 
@@ -394,7 +400,11 @@ export function registerScanCommand(
     .command("scan")
     .description("Run one-parameter sensitivity scan")
     .option("-m, --model <model>", "Model name or path")
-    .option("-c, --config <path>", "Config path", "sweep-config.yaml")
+    .option("-c, --config <path>", "Config path (default: <data-dir>/sweep-config.yaml)")
+    .option(
+      "--data-dir <path>",
+      "Data directory (default: ~/.lmstudio-bench)",
+    )
     .option(
       "--estimate-only",
       "Estimate run count without executing",
@@ -417,22 +427,21 @@ export function registerScanCommand(
       async (options: {
         model?: string;
         config?: string;
+        dataDir?: string;
         estimateOnly?: boolean;
         rerun?: boolean;
         retryFailed?: boolean;
         verbose?: boolean;
         strategy?: string;
       }) => {
-        const root = cwd();
-        const statePath = path.join(root, ".lmstudio-bench.json");
-        if (!(await fileExists(statePath))) {
+        const root = resolveDataRoot(options.dataDir ?? deps.dataRoot);
+        await ensureDataRoot(root);
+        const sp = statePath(root);
+        if (!(await fileExists(sp))) {
           throw new Error("Run `lmstudio-bench setup` first");
         }
-        const configPath = path.join(
-          root,
-          options.config ?? "sweep-config.yaml",
-        );
-        const state = await readJson(statePath, LocalStateSchema);
+        const configPath = sweepConfigPath(root, options.config);
+        const state = await readJson(sp, LocalStateSchema);
         const capabilities =
           deps.benchCapabilities ??
           (await probeLlamaBenchCapabilities(state.llama_bench_path));
@@ -506,11 +515,9 @@ export function registerScanCommand(
           string | number | boolean
         >;
 
-        const runsFilePath = path.join(
+        const runsFilePath = modelRunsPath(
           root,
-          "results",
           sanitizeFilePart(model.modelName),
-          "runs.jsonl",
         );
         const historicalRecords = await loadRunRecords(runsFilePath);
         const runnerIdentity =

@@ -1,4 +1,3 @@
-import path from "path";
 import type { Command } from "commander";
 import { writeJson, writeYamlIfMissing } from "../config/loader.js";
 import {
@@ -6,13 +5,19 @@ import {
   SweepConfigSchema,
 } from "../config/schema.js";
 import type { LocalState } from "../config/schema.js";
+import {
+  resolveDataRoot,
+  ensureDataRoot,
+  statePath,
+  sweepConfigPath,
+} from "../config/data-root.js";
 import { probeLlamaBenchCapabilities } from "../runner/llama-bench-capabilities.js";
 import type { BenchCapabilities } from "../runner/llama-bench-capabilities.js";
 import type { DiscoveryService } from "../bootstrap/discovery.js";
 import type { LoggerLike } from "../reporter/terminal.js";
 
 export interface SetupDeps {
-  cwd?: () => string;
+  dataRoot?: string;
   logger?: LoggerLike;
   discoveryService: DiscoveryService;
   benchCapabilities?: BenchCapabilities;
@@ -103,13 +108,19 @@ export function registerSetupCommand(
   command: Command,
   deps: SetupDeps,
 ): void {
-  const cwd = deps.cwd ?? (() => process.cwd());
   const logger = deps.logger ?? console;
 
   command
     .command("setup")
     .description("Discover llama.cpp tools and local models")
-    .action(async () => {
+    .option(
+      "--data-dir <path>",
+      "Data directory (default: ~/.lmstudio-bench)",
+    )
+    .action(async (options: { dataDir?: string }) => {
+      const root = resolveDataRoot(options.dataDir ?? deps.dataRoot);
+      await ensureDataRoot(root);
+
       const [tools, hardware, models] = await Promise.all([
         deps.discoveryService.discoverTools(),
         deps.discoveryService.discoverHardware(),
@@ -133,21 +144,20 @@ export function registerSetupCommand(
           size_gb: model.sizeGb,
         })),
       });
-      const statePath = path.join(cwd(), ".lmstudio-bench.json");
-      const sweepConfigPath = path.join(cwd(), "sweep-config.yaml");
-      await writeJson(statePath, state);
+      await writeJson(statePath(root), state);
       const capabilities =
         deps.benchCapabilities ??
         (await probeLlamaBenchCapabilities(state.llama_bench_path));
       const wroteConfig = await writeYamlIfMissing(
-        sweepConfigPath,
+        sweepConfigPath(root),
         createDefaultSweepConfig(state, capabilities),
       );
       logger.log(
-        `Setup complete. Found ${state.models.length} model(s).`,
+        `Setup complete. Data stored in ${root}`,
       );
+      logger.log(`Found ${state.models.length} model(s).`);
       if (wroteConfig) {
-        logger.log("Created sweep-config.yaml starter config.");
+        logger.log(`Created ${sweepConfigPath(root)}`);
       }
     });
 }
