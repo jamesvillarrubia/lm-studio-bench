@@ -1,2 +1,0 @@
-model,best_median_tg_tokens_per_sec,best_median_pp_tokens_per_sec,best_median_ttft_ms,best_config_key
-gemma-4-26B-A4B-it-Q4_K_M,51.399,449.546,,"[[""flash_attention"",true],[""kv_type_key"",""f16""],[""kv_type_value"",""f16""],[""mmap"",true],[""n_batch"",512],[""n_gpu_layers"",99],[""n_ubatch"",128],[""threads"",8]]"
