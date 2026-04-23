@@ -1,0 +1,58 @@
+name: Native binary (Bun)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            suffix: linux-x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            suffix: linux-arm64
+          - os: ubuntu-latest
+            target: bun-windows-x64
+            suffix: windows-x64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            suffix: darwin-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            suffix: darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Compile
+        env:
+          BUN_COMPILE_TARGET: ${{ matrix.target }}
+        run: bun run scripts/compile-native.ts
+
+      - name: Rename for upload
+        shell: bash
+        run: |
+          set -e
+          cd artifacts
+          if [ -f lmstudio-bench.exe ]; then
+            mv lmstudio-bench.exe "lmstudio-bench-${{ matrix.suffix }}.exe"
+          else
+            mv lmstudio-bench "lmstudio-bench-${{ matrix.suffix }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lmstudio-bench-${{ matrix.suffix }}
+          path: artifacts/*
