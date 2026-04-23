@@ -18,8 +18,10 @@ baseline:
   n_cpu_moe: 0
 
 scan:
-  # NOT SUPPORTED by this build (no flag in llama-bench):
-  mlock: []
+  # Explicitly test both mlock states.
+  mlock:
+    - false
+    - true
 
   # Context window — measures KV cache size impact on throughput
   n_ctx:
@@ -110,6 +112,9 @@ scan:
     - 1
     - 2
     - 4
+    - 6
+    - 8
+    - 10
 
 workload:
   prompt_tokens:

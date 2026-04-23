@@ -1,6 +1,6 @@
 /**
- * Axis behavior hints that let the adaptive strategy skip or pin axes
- * whose optimal value is predictable without benchmarking.
+ * Axis behavior hints that let the adaptive strategy bias sampling toward
+ * values that are likely to be good without removing coverage entirely.
  *
  * - `max`: Higher numeric value is always better (e.g. n_gpu_layers on unified memory).
  *          Pin to the maximum value in the scan range.
@@ -95,8 +95,9 @@ export function getPinnedValue(
 }
 
 /**
- * Partition scan axes into pinned (known-optimal) and swept (needs benchmarking).
- * Returns the pinned overrides to apply to the baseline and the reduced scan.
+ * Apply hints as soft preferences.
+ * Returns preferred overrides to bias the baseline/LHS sampling, while keeping
+ * every sweep axis active so all levels still receive coverage.
  */
 export function applyAxisHints(
   scan: Record<string, (string | number | boolean)[]>,
@@ -125,8 +126,7 @@ export function applyAxisHints(
     if (pinned !== null) {
       pinnedOverrides[axis] = pinned;
       pinLog.push({ axis, value: pinned, reason: hint.reason });
-      // Remove from scan — this axis is settled
-      reducedScan[axis] = [];
+      reducedScan[axis] = values;
     } else {
       reducedScan[axis] = values;
     }
