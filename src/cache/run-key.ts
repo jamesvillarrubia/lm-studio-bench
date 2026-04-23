@@ -21,19 +21,26 @@ export interface RunKeyInput {
   modelPath: string;
   appliedConfig: Record<string, string | number | boolean>;
   workload: { pp: number; tg: number };
-  repetition: { runIndex: number; repetitions: number };
+  /**
+   * runIndex: 1-based repetition index for this config/workload.
+   * repetitions: optional; not included in the cache key (v2) so changing
+   * workload.repetitions does not invalidate prior rep-1..N cache entries.
+   */
+  repetition: { runIndex: number; repetitions?: number };
   hardware: Record<string, unknown>;
   runnerIdentity: string;
 }
 
 export function computeRunKey(input: RunKeyInput): string {
   const payload = stableStringify({
-    v: 1,
+    v: 2,
     benchCommand: input.benchCommand,
     modelPath: input.modelPath,
     appliedConfig: input.appliedConfig as unknown as JsonValue,
     workload: input.workload as unknown as JsonValue,
-    repetition: input.repetition as unknown as JsonValue,
+    repetition: {
+      runIndex: input.repetition.runIndex,
+    } as unknown as JsonValue,
     hardware: input.hardware as unknown as JsonValue,
     runnerIdentity: input.runnerIdentity,
   });

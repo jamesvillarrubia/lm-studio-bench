@@ -164,6 +164,78 @@ export function findLatestRunRecordByRunKey(
   return null;
 }
 
+export interface ExecutionSignature {
+  benchCommand: "scan" | "compare";
+  appliedConfig: Record<string, string | number | boolean>;
+  workload: { pp: number; tg: number };
+  runIndex: number;
+  repetitions: number;
+}
+
+function hasOwn<T extends object>(obj: T, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function isCompatibleAppliedConfig(
+  expected: Record<string, string | number | boolean>,
+  candidate:
+    | Record<string, string | number | boolean>
+    | undefined,
+): boolean {
+  if (!candidate) {
+    return false;
+  }
+  // Backward-compatibility: older runs may omit newly-added boolean flags.
+  // Treat missing keys as equivalent only when expected value is false.
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (!hasOwn(candidate, key)) {
+      if (typeof expectedValue === "boolean" && expectedValue === false) {
+        continue;
+      }
+      return false;
+    }
+    if (candidate[key] !== expectedValue) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Legacy-compatible cache lookup when runner_identity changes.
+ * Matches by execution semantics (bench command + applied config + workload + run index),
+ * ignoring run_key, runner_identity, and total repetition count.
+ *
+ * We intentionally do not require `repetitions` to match because rep #1 for a
+ * config/workload is still valid when the user changes the planned total from
+ * 3 -> 5 or 5 -> 3.
+ */
+export function findLatestRunRecordByExecutionSignature(
+  records: RunRecord[],
+  signature: ExecutionSignature,
+): RunRecord | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (!record) {
+      continue;
+    }
+    if (record.bench_command && record.bench_command !== signature.benchCommand) {
+      continue;
+    }
+    if (record.workload.pp !== signature.workload.pp || record.workload.tg !== signature.workload.tg) {
+      continue;
+    }
+    if (record.run_index !== signature.runIndex) {
+      continue;
+    }
+    if (!isCompatibleAppliedConfig(signature.appliedConfig, recordAppliedConfig(record))) {
+      continue;
+    }
+    return record;
+  }
+  return null;
+}
+
 export function summarizeRecords(records: RunRecord[]): ConfigSummary[] {
   const byConfig = new Map<string, RunRecord[]>();
   for (const record of records) {
