@@ -10,6 +10,8 @@ import { registerListModelsCommand } from "./list-models.js";
 import { registerScanCommand } from "./scan.js";
 import { registerCompareCommand } from "./compare.js";
 import { registerReportCommand } from "./report.js";
+import { registerVisualizeCommand } from "./visualize.js";
+import { registerAnalyzeCommand } from "./analyze.js";
 
 export interface CliDeps {
   logger?: LoggerLike & { error(message: string): void };
@@ -53,6 +55,12 @@ export function createCli(deps: CliDeps = {}): Command {
     logger,
   });
   registerReportCommand(command, {
+    logger,
+  });
+  registerVisualizeCommand(command, {
+    logger,
+  });
+  registerAnalyzeCommand(command, {
     logger,
   });
 

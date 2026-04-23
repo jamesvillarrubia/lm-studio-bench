@@ -8,31 +8,59 @@
     "node": ">=22"
   },
   "packageManager": "pnpm@10.6.2",
+  "keywords": [
+    "llama.cpp",
+    "llama-bench",
+    "benchmark",
+    "lmstudio",
+    "gguf",
+    "inference",
+    "ggml"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamesvillarrubia/lm-studio-bench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jamesvillarrubia/lm-studio-bench/issues"
+  },
+  "homepage": "https://github.com/jamesvillarrubia/lm-studio-bench#readme",
   "bin": {
     "lmstudio-bench": "./dist/cli.js"
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CITATION.md"
   ],
   "scripts": {
-    "clean": "rm -rf dist",
+    "prepare": "npx tsup",
+    "clean": "rm -rf dist artifacts",
     "build": "tsup",
+    "build:native": "bun run scripts/compile-native.ts",
     "bundle": "pnpm build",
     "cli": "node dist/cli.js",
     "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test",
+    "release:check": "npm run lint && npm test && npm run build",
+    "release:check:native": "npm run lint && npm test && npm run build:native",
+    "workflow:generate": "pipecraft generate",
+    "workflow:validate": "pipecraft validate"
   },
   "dependencies": {
+    "@stdlib/stats-base-dists-f-cdf": "^0.2.3",
     "chalk": "^5.6.2",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.3",
+    "ml-matrix": "^6.12.1",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "pipecraft": "^0.37.4",
     "tsup": "^8.5.1",
     "typescript": "^6.0.2",
     "vitest": "^4.1.4"
