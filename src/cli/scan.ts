@@ -36,19 +36,14 @@ import {
   buildFocusedGrid,
 } from "../sweep/adaptive.js";
 import type { PhaseResult, AxisImpact } from "../sweep/adaptive.js";
-import {
-  partitionAxes,
-  ternaryProbePoints,
-  narrowRange,
-  buildTernaryRoundEntries,
-  bestValueForAxis,
-} from "../sweep/ternary.js";
+import { buildLhsSamples, estimateLhsBudget } from "../sweep/lhs.js";
 import { getDefaultAxisHints, applyAxisHints } from "../sweep/axis-hints.js";
 import type { AxisHintMap } from "../sweep/axis-hints.js";
 import {
   appendRunRecord,
   loadRunRecords,
   findLatestRunRecordByRunKey,
+  findLatestRunRecordByExecutionSignature,
   summarizeRecords,
 } from "../reporter/results.js";
 import { printScanSummary } from "../reporter/terminal.js";
@@ -162,7 +157,7 @@ function buildCacheHitRecord(
   });
 }
 
-export type ScanStrategy = "oat" | "adaptive";
+export type ScanStrategy = "oat" | "adaptive" | "confirmatory";
 
 interface RunEntriesContext {
   entries: SensitivityEntry[];
@@ -209,6 +204,10 @@ async function runEntries(ctx: RunEntriesContext): Promise<RunEntriesResult> {
       ctx.workload.prompt_tokens.length *
       ctx.workload.generation_tokens.length *
       ctx.workload.repetitions;
+  const displayTotal =
+    ctx.totalOverride !== undefined
+      ? ctx.totalOverride
+      : totalRuns + (ctx.runOffset ?? 0);
 
   for (const entry of ctx.entries) {
     for (const promptTokens of ctx.workload.prompt_tokens) {
@@ -241,7 +240,7 @@ async function runEntries(ctx: RunEntriesContext): Promise<RunEntriesResult> {
             .map(([k, v]) => `${k}=${v}`)
             .join(" ");
           const label = ctx.phaseLabel ? `${ctx.phaseLabel} ` : "";
-          const progressPrefix = `${label}[${runIndex}/${totalRuns}]`;
+          const progressPrefix = `${label}[${runIndex}/${displayTotal}]`;
 
           const baseRecord = {
             id: `run-${ctx.now().toISOString().replace(/[:.]/g, "-")}-${runIndex}`,
@@ -267,12 +266,26 @@ async function runEntries(ctx: RunEntriesContext): Promise<RunEntriesResult> {
             repetitions: ctx.workload.repetitions,
           };
 
-          const latest = findLatestRunRecordByRunKey(
+          const latestByKey = findLatestRunRecordByRunKey(
             [...ctx.historicalRecords, ...records],
             runKey,
           );
+          const latest =
+            latestByKey ??
+            findLatestRunRecordByExecutionSignature(
+              [...ctx.historicalRecords, ...records],
+              {
+                benchCommand: "scan",
+                appliedConfig: appliedRecord,
+                workload: { pp: promptTokens, tg: generationTokens },
+                runIndex: repetition,
+                repetitions: ctx.workload.repetitions,
+              },
+            );
           const canReuseLatestSuccess =
             !ctx.rerun && latest?.status === "success";
+          const reusedBySignature =
+            latest !== null && latestByKey === null;
 
           if (canReuseLatestSuccess) {
             cacheHits += 1;
@@ -286,7 +299,7 @@ async function runEntries(ctx: RunEntriesContext): Promise<RunEntriesResult> {
             });
             if (ctx.verbose) {
               ctx.logger.log(
-                `${chalk.dim(progressPrefix)} ${chalk.yellow("CACHED")} pp=${promptTokens} tg=${generationTokens} | ${configSummary}`,
+                `${chalk.dim(progressPrefix)} ${chalk.yellow("CACHED")}${reusedBySignature ? chalk.magenta(" (legacy)") : ""} pp=${promptTokens} tg=${generationTokens} | ${configSummary}`,
               );
             }
             continue;
@@ -420,8 +433,18 @@ export function registerScanCommand(
     .option("-v, --verbose", "Print detailed progress for each run")
     .option(
       "-s, --strategy <strategy>",
-      "Sweep strategy: oat (one-at-a-time) or adaptive (two-phase)",
+      "Sweep strategy: oat (one-at-a-time), adaptive (LHS + focused grid), or confirmatory (OAT pinned to best observed config)",
       "oat",
+    )
+    .option(
+      "--lhs-budget <n>",
+      "Number of LHS sample configs in phase 1 (adaptive only, 0 = auto)",
+      "0",
+    )
+    .option(
+      "--confirmatory-top-n <n>",
+      "Which rank to use as the confirmatory baseline (1 = overall best, 2 = 2nd best, …)",
+      "1",
     )
     .action(
       async (options: {
@@ -433,7 +456,15 @@ export function registerScanCommand(
         retryFailed?: boolean;
         verbose?: boolean;
         strategy?: string;
+        lhsBudget?: string;
+        confirmatoryTopN?: string;
       }) => {
+        const lhsBudgetOverride =
+          Number.parseInt(options.lhsBudget ?? "0", 10) || 0;
+        const confirmatoryTopN = Math.max(
+          1,
+          Number.parseInt(options.confirmatoryTopN ?? "1", 10) || 1,
+        );
         const root = resolveDataRoot(options.dataDir ?? deps.dataRoot);
         await ensureDataRoot(root);
         const sp = statePath(root);
@@ -509,7 +540,11 @@ export function registerScanCommand(
         }
 
         const strategy: ScanStrategy =
-          options.strategy === "adaptive" ? "adaptive" : "oat";
+          options.strategy === "adaptive"
+            ? "adaptive"
+            : options.strategy === "confirmatory"
+              ? "confirmatory"
+              : "oat";
         const baseline = resolvedConfig.baseline as Record<
           string,
           string | number | boolean
@@ -553,7 +588,6 @@ export function registerScanCommand(
 
         if (strategy === "adaptive") {
           // ── Apply axis hints to pin known-optimal values ──
-          // Hardware defaults, then YAML overrides on top
           const yamlHints = config.axis_hints ?? {};
           const hints: AxisHintMap = {
             ...getDefaultAxisHints(state.hardware),
@@ -570,12 +604,11 @@ export function registerScanCommand(
           const { pinnedOverrides, reducedScan, pinLog } =
             applyAxisHints(appliedScan, hints);
 
-          // Override baseline with pinned values
           const adaptiveBaseline = { ...baseline, ...pinnedOverrides };
 
           if (verbose && pinLog.length > 0) {
             logger.log(
-              chalk.bold("\n── Pinned Axes (known-optimal) ──"),
+              chalk.bold("\n── Preferred Axes (soft bias) ──"),
             );
             for (const pin of pinLog) {
               logger.log(
@@ -584,152 +617,70 @@ export function registerScanCommand(
             }
           } else if (pinLog.length > 0) {
             logger.log(
-              `Pinned ${pinLog.length} axis(es) to known-optimal: ${pinLog.map((p) => `${p.axis}=${String(p.value)}`).join(", ")}`,
+              `Biasing ${pinLog.length} axis(es) toward preferred values: ${pinLog.map((p) => `${p.axis}=${String(p.value)}`).join(", ")}`,
             );
           }
 
-          // ── Partition axes: ternary search for numeric, exhaustive for rest ──
-          const partition = partitionAxes(reducedScan);
+          // ── Phase 1: Latin Hypercube Sample ──
+          const lhsBudget =
+            lhsBudgetOverride > 0
+              ? lhsBudgetOverride
+              : estimateLhsBudget(reducedScan);
+          const lhsEntries = buildLhsSamples(
+            adaptiveBaseline,
+            reducedScan,
+            lhsBudget,
+            pinnedOverrides,
+          );
+
+          const lhsRunCount =
+            lhsEntries.length *
+            resolvedConfig.workload.prompt_tokens.length *
+            resolvedConfig.workload.generation_tokens.length *
+            resolvedConfig.workload.repetitions;
 
           if (verbose) {
-            if (partition.ternary.length > 0) {
-              logger.log(
-                chalk.bold("\n── Ternary Search Axes ──"),
-              );
-              for (const t of partition.ternary) {
-                logger.log(
-                  `  ${t.axis}: ${t.sortedValues.length} values [${t.sortedValues[0]}..${t.sortedValues[t.sortedValues.length - 1]}]`,
-                );
-              }
-            }
-            if (partition.exhaustive.length > 0) {
-              logger.log(
-                chalk.bold("\n── Exhaustive Axes ──"),
-              );
-              for (const e of partition.exhaustive) {
-                logger.log(
-                  `  ${e.axis}: [${e.values.join(", ")}]`,
-                );
-              }
-            }
-          }
-
-          // ── Phase 1: Ternary search rounds ──
-          const maxRounds = 2;
-          let currentBaseline = { ...adaptiveBaseline };
-          let allPhaseResults: PhaseResult[] = [];
-          let runOffset = 0;
-
-          // Initial probe points for ternary axes
-          const probeMap = new Map<string, number[]>();
-          for (const t of partition.ternary) {
-            probeMap.set(t.axis, ternaryProbePoints(t.sortedValues));
-          }
-
-          for (let round = 0; round < maxRounds; round++) {
-            const roundEntries = buildTernaryRoundEntries(
-              currentBaseline,
-              partition,
-              probeMap,
+            const activeAxes = Object.entries(reducedScan).filter(
+              ([, v]) => v && v.length > 0,
             );
-            const roundRunCount =
-              roundEntries.length *
-              resolvedConfig.workload.prompt_tokens.length *
-              resolvedConfig.workload.generation_tokens.length *
-              resolvedConfig.workload.repetitions;
-
-            if (verbose) {
-              logger.log(
-                chalk.bold(
-                  `\n── Phase 1 Round ${round + 1}/${maxRounds} ──`,
-                ),
-              );
-              for (const [axis, points] of probeMap.entries()) {
-                logger.log(
-                  `  ${axis}: probe [${points.join(", ")}]`,
-                );
-              }
-              logger.log(
-                `  ${roundEntries.length} configs × ${resolvedConfig.workload.repetitions} reps = ${chalk.cyan(String(roundRunCount))} runs`,
-              );
+            logger.log(chalk.bold("\n── Phase 1: Latin Hypercube Sample ──"));
+            logger.log(`  Sweep axes: ${activeAxes.length}`);
+            for (const [axis, values] of activeAxes) {
+              logger.log(`    ${axis}: ${values.length} levels`);
             }
-
-            if (options.estimateOnly) {
-              if (round === 0) {
-                logger.log(
-                  `Estimated phase 1 round 1: ${roundRunCount} runs (round 2 narrows, then phase 2 depends on results)`,
-                );
-              }
-              return;
-            }
-
-            const roundResult = await runEntries({
-              ...sharedCtx,
-              entries: roundEntries,
-              historicalRecords: [
-                ...historicalRecords,
-                ...allRecords,
-              ],
-              runOffset,
-              phaseLabel: `P1R${round + 1}`,
-            });
-
-            allRecords.push(...roundResult.records);
-            allPhaseResults.push(...roundResult.phaseResults);
-            totalExecuted += roundResult.executed;
-            totalCacheHits += roundResult.cacheHits;
-            totalFailed += roundResult.failed;
-            if (roundResult.hadFailures) hadFailures = true;
-            runOffset += roundRunCount;
-
-            // Narrow ternary axes toward best value for next round
-            let anyNarrowed = false;
-            for (const t of partition.ternary) {
-              const best = bestValueForAxis(
-                roundResult.phaseResults,
-                t.axis,
-              );
-              if (best !== null) {
-                const narrowed = narrowRange(
-                  t.sortedValues,
-                  best,
-                  round + 1,
-                );
-                const prev = probeMap.get(t.axis) ?? [];
-                // Only continue narrowing if we get different points
-                if (JSON.stringify(narrowed) !== JSON.stringify(prev)) {
-                  probeMap.set(t.axis, narrowed);
-                  anyNarrowed = true;
-                }
-                // Update baseline with best so far
-                currentBaseline[t.axis] = best;
-              }
-            }
-
-            // Also update baseline with best exhaustive values
-            for (const e of partition.exhaustive) {
-              const best = bestValueForAxis(
-                roundResult.phaseResults,
-                e.axis,
-              );
-              if (best !== null) {
-                currentBaseline[e.axis] = best;
-              }
-            }
-
-            if (!anyNarrowed) {
-              if (verbose) {
-                logger.log(
-                  chalk.dim(
-                    "  No further narrowing possible — stopping early.",
-                  ),
-                );
-              }
-              break;
-            }
+            logger.log(
+              `  LHS budget: ${lhsBudget} → ${lhsEntries.length} unique configs`,
+            );
+            logger.log(
+              `  ${lhsEntries.length} configs × ${resolvedConfig.workload.repetitions} reps = ${chalk.cyan(String(lhsRunCount))} runs`,
+            );
           }
 
-          // ── Analyze impact from all phase 1 rounds ──
+          if (options.estimateOnly) {
+            logger.log(
+              `Estimated phase 1 (LHS): ${lhsRunCount} runs (phase 2 focused grid depends on results)`,
+            );
+            return;
+          }
+
+          const lhsResult = await runEntries({
+            ...sharedCtx,
+            entries: lhsEntries,
+            historicalRecords: [...historicalRecords, ...allRecords],
+            runOffset: 0,
+            phaseLabel: "LHS",
+          });
+
+          allRecords.push(...lhsResult.records);
+          const allPhaseResults: PhaseResult[] = [
+            ...lhsResult.phaseResults,
+          ];
+          totalExecuted += lhsResult.executed;
+          totalCacheHits += lhsResult.cacheHits;
+          totalFailed += lhsResult.failed;
+          if (lhsResult.hadFailures) hadFailures = true;
+
+          // ── Analyze impact from LHS results ──
           const impacts = rankAxisImpact(allPhaseResults);
           if (verbose || impacts.length > 0) {
             printImpactReport(logger, impacts);
@@ -746,9 +697,9 @@ export function registerScanCommand(
               ),
             );
           } else {
-            // ── Phase 2: Focused grid on top impactful axes ──
+            // ── Phase 2: Focused grid around top performers ──
             const winner = buildPhase1Winner(
-              currentBaseline,
+              adaptiveBaseline,
               significantImpacts,
             );
             const phase2Entries = buildFocusedGrid(
@@ -766,9 +717,7 @@ export function registerScanCommand(
 
             if (verbose) {
               logger.log(
-                chalk.bold(
-                  "\n── Phase 2: Focused Grid ──",
-                ),
+                chalk.bold("\n── Phase 2: Focused Grid ──"),
               );
               logger.log(
                 `  Top axes: ${significantImpacts.slice(0, 3).map((i) => i.axis).join(", ")}`,
@@ -785,7 +734,7 @@ export function registerScanCommand(
                 ...historicalRecords,
                 ...allRecords,
               ],
-              runOffset,
+              runOffset: lhsRunCount,
               phaseLabel: "P2",
             });
 
@@ -795,6 +744,76 @@ export function registerScanCommand(
             totalFailed += phase2.failed;
             if (phase2.hadFailures) hadFailures = true;
           }
+        } else if (strategy === "confirmatory") {
+          // ── Confirmatory OAT: pin to best observed config, vary each axis ──
+          const summaries = summarizeRecords(historicalRecords);
+          const successfulSummaries = summaries.filter(
+            (s) => s.medianTg !== null,
+          );
+
+          let confirmatoryBaseline: Record<string, string | number | boolean>;
+
+          if (successfulSummaries.length === 0) {
+            logger.log(
+              chalk.yellow(
+                "No historical runs found — falling back to config baseline for confirmatory scan.",
+              ),
+            );
+            confirmatoryBaseline = baseline;
+          } else {
+            const rankIndex = Math.min(
+              confirmatoryTopN - 1,
+              successfulSummaries.length - 1,
+            );
+            const best = successfulSummaries[rankIndex]!;
+            // Merge: start from the full YAML baseline so no keys are missing,
+            // then overlay the observed best config values.
+            confirmatoryBaseline = {
+              ...baseline,
+              ...(best.config as Record<string, string | number | boolean>),
+            };
+            logger.log(
+              chalk.bold(
+                `\nConfirmatory baseline (rank #${rankIndex + 1}, ${best.medianTg?.toFixed(3)} tg tok/s):`,
+              ),
+            );
+            for (const [key, value] of Object.entries(confirmatoryBaseline)) {
+              logger.log(`  ${key}: ${JSON.stringify(value)}`);
+            }
+          }
+
+          const entries = expandSensitivityScan(
+            confirmatoryBaseline,
+            appliedScan,
+          );
+          const runCount =
+            entries.length *
+            resolvedConfig.workload.prompt_tokens.length *
+            resolvedConfig.workload.generation_tokens.length *
+            resolvedConfig.workload.repetitions;
+
+          if (verbose) {
+            logger.log(chalk.bold("\n── Confirmatory OAT ──"));
+            logger.log(
+              `  ${entries.length} configs × ${resolvedConfig.workload.prompt_tokens.length} prompt sizes × ${resolvedConfig.workload.generation_tokens.length} gen sizes × ${resolvedConfig.workload.repetitions} reps = ${chalk.cyan(String(runCount))} total runs`,
+            );
+          }
+
+          if (options.estimateOnly) {
+            logger.log(`Estimated runs: ${runCount}`);
+            return;
+          }
+
+          const result = await runEntries({
+            ...sharedCtx,
+            entries,
+          });
+
+          allRecords = result.records;
+          totalExecuted = result.executed;
+          totalCacheHits = result.cacheHits;
+          totalFailed = result.failed;
+          hadFailures = result.hadFailures;
         } else {
           // ── Standard OAT ──
           const entries = expandSensitivityScan(

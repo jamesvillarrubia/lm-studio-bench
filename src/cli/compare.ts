@@ -32,6 +32,7 @@ import {
   appendRunRecord,
   loadRunRecords,
   findLatestRunRecordByRunKey,
+  findLatestRunRecordByExecutionSignature,
   summarizeRecords,
 } from "../reporter/results.js";
 import {
@@ -278,20 +279,37 @@ export function registerCompareCommand(
               run_index: repetition,
               repetitions: resolvedConfig.workload.repetitions,
             };
-            const latest = findLatestRunRecordByRunKey(
+            const latestByKey = findLatestRunRecordByRunKey(
               [...historicalRecords, ...modelRecords],
               runKey,
             );
+            const latest =
+              latestByKey ??
+              findLatestRunRecordByExecutionSignature(
+                [...historicalRecords, ...modelRecords],
+                {
+                  benchCommand: "compare",
+                  appliedConfig: appliedBaselineRecord,
+                  workload: {
+                    pp: promptTokens,
+                    tg: generationTokens,
+                  },
+                  runIndex: repetition,
+                  repetitions: resolvedConfig.workload.repetitions,
+                },
+              );
             const rerun = Boolean(options.rerun);
             const retryFailed = Boolean(options.retryFailed);
             const canReuseLatestSuccess =
               !rerun && latest?.status === "success";
+            const reusedBySignature =
+              latest !== null && latestByKey === null;
 
             if (canReuseLatestSuccess) {
               const record = buildCacheHitRecord(base, latest);
               modelRecords.push(record);
               logger.log(
-                `Cache hit: skipping benchmark${retryFailed ? " (--retry-failed)" : ""} (model=${model.modelName}, run_key=${runKey}, reused_run_id=${latest.id})`,
+                `Cache hit${reusedBySignature ? " (legacy)" : ""}: skipping benchmark${retryFailed ? " (--retry-failed)" : ""} (model=${model.modelName}, run_key=${runKey}, reused_run_id=${latest.id})`,
               );
               continue;
             }
